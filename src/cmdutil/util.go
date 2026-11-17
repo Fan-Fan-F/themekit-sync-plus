@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,11 @@ type Flags struct {
 	Live                          bool
 	HidePreviewBar                bool
 	DisableThemeKitAccessNotifier bool
+
+	NoCache         bool
+	DryRun          bool
+	Concurrency     int
+	ContinueOnError bool
 }
 
 // Ctx is a specific context that a command will run in
@@ -246,23 +252,48 @@ func getFlagEnv(flags Flags) env.Env {
 
 func expandEnvironments(flags Flags, confEnvs map[string]*env.Env) []string {
 	envs := []string{}
+	seen := make(map[string]bool)
+
+	addEnv := func(name string) {
+		if !seen[name] && name != "" {
+			seen[name] = true
+			envs = append(envs, name)
+		}
+	}
 
 	if flags.AllEnvs {
+		allNames := make([]string, 0, len(confEnvs))
 		for env := range confEnvs {
-			envs = append(envs, env)
+			allNames = append(allNames, env)
+		}
+		sort.Strings(allNames)
+		for _, name := range allNames {
+			addEnv(name)
 		}
 		return envs
 	}
 
 	for _, flagEnv := range flags.Environments {
-		if strings.Contains(flagEnv, "*") {
-			for confEnv := range confEnvs {
-				if glob.Glob(flagEnv, confEnv) {
-					envs = append(envs, confEnv)
-				}
+		parts := strings.Split(flagEnv, ",")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
 			}
-		} else {
-			envs = append(envs, flagEnv)
+			if strings.Contains(part, "*") {
+				matching := []string{}
+				for confEnv := range confEnvs {
+					if glob.Glob(part, confEnv) {
+						matching = append(matching, confEnv)
+					}
+				}
+				sort.Strings(matching)
+				for _, name := range matching {
+					addEnv(name)
+				}
+			} else {
+				addEnv(part)
+			}
 		}
 	}
 
@@ -281,27 +312,66 @@ func forEachClient(newClient clientFact, flags Flags, args []string, handler fun
 	if err != nil {
 		return err
 	}
+
 	var handlerGroup errgroup.Group
+	var errMu sync.Mutex
+	envErrors := make(map[string]error)
+
 	for _, ctx := range ctxs {
 		ctx := ctx
-		handlerGroup.Go(func() error { return handler(ctx) })
+		handlerGroup.Go(func() error {
+			handlerErr := handler(ctx)
+			if handlerErr != nil {
+				errMu.Lock()
+				envErrors[ctx.Env.Name] = handlerErr
+				errMu.Unlock()
+				if !flags.ContinueOnError {
+					return handlerErr
+				}
+			}
+			return nil
+		})
 	}
-	err = handlerGroup.Wait()
-	if err == nil {
+
+	waitErr := handlerGroup.Wait()
+	if waitErr == nil {
 		progressBarGroup.Wait()
 	}
-	if err == ErrReload {
+	if waitErr == ErrReload {
 		return forEachClient(newClient, flags, args, handler)
 	}
+
 	hasErrors := false
 	for _, ctx := range ctxs {
 		ctx.summary.display(ctx)
 		hasErrors = hasErrors || ctx.summary.hasErrors()
 	}
-	if err == nil && hasErrors {
+
+	if len(ctxs) > 1 {
+		colors.ColorStdOut.Printf("\n--- Multi-Environment Sync Summary (%d environments) ---", len(ctxs))
+		for _, ctx := range ctxs {
+			if envErr, failed := envErrors[ctx.Env.Name]; failed {
+				colors.ColorStdOut.Printf("  [%s] %s: %v", colors.Yellow(ctx.Env.Name), colors.Red("FAILED"), envErr)
+			} else if ctx.summary.hasErrors() {
+				colors.ColorStdOut.Printf("  [%s] %s: runtime file errors occurred", colors.Yellow(ctx.Env.Name), colors.Red("FAILED"))
+			} else {
+				colors.ColorStdOut.Printf("  [%s] %s", colors.Yellow(ctx.Env.Name), colors.Green("SUCCESS"))
+			}
+		}
+		colors.ColorStdOut.Println("---------------------------------------------------------")
+	}
+
+	if len(envErrors) > 0 {
+		if waitErr != nil {
+			return waitErr
+		}
+		return fmt.Errorf("one or more environments failed during sync (%d failed)", len(envErrors))
+	}
+
+	if waitErr == nil && hasErrors {
 		return ErrDuringRuntime
 	}
-	return err
+	return waitErr
 }
 
 // ForSingleClient will generate a command context for all the available environments,

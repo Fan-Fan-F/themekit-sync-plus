@@ -57,31 +57,92 @@ func deploy(ctx *cmdutil.Ctx) error {
 		return fmt.Errorf("[%s] environment is readonly", colors.Green(ctx.Env.Name))
 	}
 
-	assetsActions, err := generateActions(ctx)
+	if ctx.Flags.DryRun {
+		colors.ColorStdOut.Printf("[%s] %s - No changes will be applied to remote store",
+			colors.Yellow(ctx.Env.Name),
+			colors.Yellow("[DRY-RUN]"),
+		)
+	}
+
+	cache := shopify.NewChecksumCache(ctx.Env.Directory, ctx.Flags.NoCache)
+	assetsActions, err := generateActionsWithCache(ctx, cache)
 	if err != nil {
 		return err
 	}
 
-	var deployGroup sync.WaitGroup
-	ctx.StartProgress(len(assetsActions))
+	type actionItem struct {
+		path string
+		op   file.Op
+	}
+
+	var regularActions []actionItem
+	hasSettingsData := false
+	var settingsOp file.Op
+
 	for path, op := range assetsActions {
 		if path == settingsDataKey {
-			defer perform(ctx, path, op, "")
-			continue
+			hasSettingsData = true
+			settingsOp = op
+		} else {
+			regularActions = append(regularActions, actionItem{path: path, op: op})
 		}
+	}
+
+	concurrency := ctx.Flags.Concurrency
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+	if concurrency > 50 {
+		concurrency = 50
+	}
+
+	ctx.StartProgress(len(assetsActions))
+
+	jobs := make(chan actionItem, len(regularActions))
+	for _, act := range regularActions {
+		jobs <- act
+	}
+	close(jobs)
+
+	numWorkers := concurrency
+	if len(regularActions) < numWorkers {
+		numWorkers = len(regularActions)
+	}
+	if numWorkers <= 0 && len(regularActions) > 0 {
+		numWorkers = 1
+	}
+
+	var deployGroup sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
 		deployGroup.Add(1)
-		go func(path string, op file.Op) {
+		go func() {
 			defer deployGroup.Done()
-			perform(ctx, path, op, "")
-		}(path, op)
+			for item := range jobs {
+				perform(ctx, item.path, item.op, "")
+			}
+		}()
 	}
 
 	deployGroup.Wait()
+
+	// Sync settings_data.json last as required by Shopify theme architecture
+	if hasSettingsData {
+		perform(ctx, settingsDataKey, settingsOp, "")
+	}
+
+	if !ctx.Flags.DryRun && !ctx.Flags.NoCache {
+		_ = cache.Save()
+	}
 
 	return nil
 }
 
 func generateActions(ctx *cmdutil.Ctx) (map[string]file.Op, error) {
+	cache := shopify.NewChecksumCache(ctx.Env.Directory, ctx.Flags.NoCache)
+	return generateActionsWithCache(ctx, cache)
+}
+
+func generateActionsWithCache(ctx *cmdutil.Ctx, cache *shopify.ChecksumCache) (map[string]file.Op, error) {
 	assetsActions := map[string]file.Op{}
 	pathsToChecksums := map[string]string{}
 
@@ -96,7 +157,7 @@ func generateActions(ctx *cmdutil.Ctx) (map[string]file.Op, error) {
 		pathsToChecksums[remoteAsset.Key] = remoteAsset.Checksum
 	}
 
-	localAssets, err := shopify.FindAssets(ctx.Env, ctx.Args...)
+	localAssets, err := shopify.FindAssetsWithCache(ctx.Env, cache, ctx.Args...)
 	if err != nil {
 		return assetsActions, err
 	}

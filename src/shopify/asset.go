@@ -44,19 +44,24 @@ func ReadAsset(e *env.Env, filename string) (Asset, error) {
 // read directories recursively. If no paths are passed in then the whole project
 // directory will be read
 func FindAssets(e *env.Env, paths ...string) (assets []Asset, err error) {
+	return FindAssetsWithCache(e, nil, paths...)
+}
+
+// FindAssetsWithCache loads assets using an optional ChecksumCache to accelerate incremental sync
+func FindAssetsWithCache(e *env.Env, cache *ChecksumCache, paths ...string) (assets []Asset, err error) {
 	filter, err := file.NewFilter(e.Directory, e.IgnoredFiles, e.Ignores)
 	if err != nil {
 		return []Asset{}, err
 	}
 
 	if len(paths) == 0 {
-		return loadAssetsFromDirectory(e, "", filter.Match)
+		return loadAssetsFromDirectoryWithCache(e, "", filter.Match, cache)
 	}
 
 	for _, path := range paths {
-		asset, err := readAsset(e.Directory, path)
+		asset, err := readAssetWithCache(e.Directory, path, cache)
 		if err == ErrAssetIsDir {
-			dirAssets, err := loadAssetsFromDirectory(e, path, filter.Match)
+			dirAssets, err := loadAssetsFromDirectoryWithCache(e, path, filter.Match, cache)
 			if err != nil {
 				return []Asset{}, err
 			}
@@ -132,6 +137,10 @@ func assetsToFilenames(assets []Asset) []string {
 }
 
 func loadAssetsFromDirectory(e *env.Env, dir string, ignore func(path string) bool) (assets []Asset, err error) {
+	return loadAssetsFromDirectoryWithCache(e, dir, ignore, nil)
+}
+
+func loadAssetsFromDirectoryWithCache(e *env.Env, dir string, ignore func(path string) bool, cache *ChecksumCache) (assets []Asset, err error) {
 	var root = e.Directory
 	err = filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -146,7 +155,10 @@ func loadAssetsFromDirectory(e *env.Env, dir string, ignore func(path string) bo
 		}
 		assetKey = filepath.ToSlash(assetKey)
 		if !ignore(assetKey) {
-			var asset, _ = ReadAsset(e, assetKey) // TODO handle error
+			asset, readErr := readAssetWithCache(root, assetKey, cache)
+			if readErr != nil {
+				return fmt.Errorf("failed to read asset %s: %w", assetKey, readErr)
+			}
 			assets = append(assets, asset)
 		}
 		return nil
@@ -155,6 +167,10 @@ func loadAssetsFromDirectory(e *env.Env, dir string, ignore func(path string) bo
 }
 
 func readAsset(root, filename string) (asset Asset, err error) {
+	return readAssetWithCache(root, filename, nil)
+}
+
+func readAssetWithCache(root, filename string, cache *ChecksumCache) (asset Asset, err error) {
 	path := filepath.Join(root, filename)
 
 	key, err := filepath.Rel(root, path)
@@ -162,12 +178,8 @@ func readAsset(root, filename string) (asset Asset, err error) {
 		return Asset{}, err
 	}
 
-	asset = Asset{Key: filepath.ToSlash(key)}
-	file, err := os.Open(path)
-	if err != nil {
-		return Asset{}, fmt.Errorf("readAsset: %s", err)
-	}
-	defer file.Close()
+	cleanKey := filepath.ToSlash(key)
+	asset = Asset{Key: cleanKey}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -177,6 +189,19 @@ func readAsset(root, filename string) (asset Asset, err error) {
 	if info.IsDir() {
 		return Asset{}, ErrAssetIsDir
 	}
+
+	if cache != nil {
+		if cachedChecksum, ok := cache.Get(cleanKey, info.ModTime().UnixNano(), info.Size()); ok {
+			asset.Checksum = cachedChecksum
+			return asset, nil
+		}
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return Asset{}, fmt.Errorf("readAsset: %s", err)
+	}
+	defer file.Close()
 
 	buffer, err := ioutil.ReadAll(file)
 	if err != nil {
@@ -191,6 +216,11 @@ func readAsset(root, filename string) (asset Asset, err error) {
 		asset.Attachment = base64.StdEncoding.EncodeToString(buffer)
 		asset.Checksum = calculateByteArrayChecksum(buffer)
 	}
+
+	if cache != nil {
+		cache.Set(cleanKey, info.ModTime().UnixNano(), info.Size(), asset.Checksum)
+	}
+
 	return asset, nil
 }
 

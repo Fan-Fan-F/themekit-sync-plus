@@ -16,3 +16,8 @@ docs/.jekyll-metadata
 
 # created when using mitm_proxy
 themekit_dump
+
+# build binaries and cache
+theme
+theme.exe
+.themekit_cache.json

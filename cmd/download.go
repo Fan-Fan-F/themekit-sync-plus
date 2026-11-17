@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Shopify/themekit/src/cmdutil"
+	"github.com/Shopify/themekit/src/colors"
 	"github.com/Shopify/themekit/src/file"
 	"github.com/Shopify/themekit/src/shopify"
 )
@@ -37,8 +38,6 @@ var downloadCmd = &cobra.Command{
 }
 
 func download(ctx *cmdutil.Ctx) error {
-	var downloadGroup sync.WaitGroup
-
 	assets, err := filesToDownload(ctx)
 	if err != nil {
 		return err
@@ -48,13 +47,55 @@ func download(ctx *cmdutil.Ctx) error {
 		return fmt.Errorf("No files to download")
 	}
 
-	ctx.StartProgress(len(assets))
+	if ctx.Flags.DryRun {
+		colors.ColorStdOut.Printf("[%s] %s - No files will be written to disk",
+			colors.Yellow(ctx.Env.Name),
+			colors.Yellow("[DRY-RUN]"),
+		)
+	}
+
+	type downloadItem struct {
+		path string
+		op   file.Op
+	}
+	var items []downloadItem
 	for asset, op := range assets {
+		items = append(items, downloadItem{path: asset, op: op})
+	}
+
+	concurrency := ctx.Flags.Concurrency
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+	if concurrency > 50 {
+		concurrency = 50
+	}
+
+	ctx.StartProgress(len(items))
+
+	jobs := make(chan downloadItem, len(items))
+	for _, it := range items {
+		jobs <- it
+	}
+	close(jobs)
+
+	numWorkers := concurrency
+	if len(items) < numWorkers {
+		numWorkers = len(items)
+	}
+	if numWorkers <= 0 && len(items) > 0 {
+		numWorkers = 1
+	}
+
+	var downloadGroup sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
 		downloadGroup.Add(1)
-		go func(path string, op file.Op) {
+		go func() {
 			defer downloadGroup.Done()
-			perform(ctx, path, op, "")
-		}(asset, op)
+			for it := range jobs {
+				perform(ctx, it.path, it.op, "")
+			}
+		}()
 	}
 
 	downloadGroup.Wait()

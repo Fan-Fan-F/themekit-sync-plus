@@ -104,6 +104,10 @@ func init() {
 	ThemeCmd.PersistentFlags().BoolVar(&flags.DisableIgnore, "no-ignore", false, "Will disable config ignores so that all files can be changed")
 	ThemeCmd.PersistentFlags().BoolVar(&flags.AllowLive, "allow-live", false, "Will allow themekit to make changes to the live theme on the store.")
 	ThemeCmd.PersistentFlags().BoolVarP(&flags.DisableThemeKitAccessNotifier, "no-theme-kit-access-notifier", "", false, "Stop theme kit from notifying about Theme Access.")
+	ThemeCmd.PersistentFlags().BoolVar(&flags.NoCache, "no-cache", false, "disable local checksum cache for incremental sync")
+	ThemeCmd.PersistentFlags().BoolVar(&flags.DryRun, "dry-run", false, "simulate commands without making actual changes")
+	ThemeCmd.PersistentFlags().IntVar(&flags.Concurrency, "concurrency", 10, "max concurrent file operations (default 10, 1-50)")
+	ThemeCmd.PersistentFlags().BoolVar(&flags.ContinueOnError, "continue-on-error", false, "continue with remaining environments if one fails in multi-environment mode")
 
 	watchCmd.Flags().StringVarP(&flags.Notify, "notify", "n", "", "file to touch or url to notify when a file has been changed")
 	watchCmd.Flags().BoolVarP(&flags.AllEnvs, "allenvs", "a", false, "run command with all environments")

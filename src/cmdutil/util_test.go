@@ -171,6 +171,8 @@ func TestExpandEnvironments(t *testing.T) {
 		{envs: []string{}, conf: []string{"development"}, expected: []string{}},
 		{envs: []string{"production"}, conf: []string{"production", "foob"}, expected: []string{"production"}},
 		{envs: []string{"production"}, conf: []string{}, expected: []string{"production"}},
+		{envs: []string{"dev,staging", "prod"}, conf: []string{"dev", "staging", "prod"}, expected: []string{"dev", "staging", "prod"}},
+		{envs: []string{"dev, dev"}, conf: []string{"dev"}, expected: []string{"dev"}},
 		{envs: []string{"p*"}, conf: []string{"production", "prod", "puddle", "other"}, expected: []string{"production", "prod", "puddle"}},
 		{all: true, envs: []string{}, conf: []string{"dev", "prod", "test"}, expected: []string{"dev", "prod", "test"}},
 	}

@@ -98,6 +98,22 @@ func watch(ctx *cmdutil.Ctx, events chan file.Event, sig chan os.Signal, notifie
 func perform(ctx *cmdutil.Ctx, path string, op file.Op, checksum string) {
 	defer ctx.DoneTask(op)
 
+	if ctx.Flags.DryRun {
+		switch op {
+		case file.Skip:
+			if ctx.Flags.Verbose {
+				ctx.Log.Printf("[%s] [DRY-RUN] Would skip %s", colors.Green(ctx.Env.Name), colors.Blue(path))
+			}
+		case file.Remove:
+			ctx.Log.Printf("[%s] [DRY-RUN] Would delete %s", colors.Green(ctx.Env.Name), colors.Red(path))
+		case file.Get:
+			ctx.Log.Printf("[%s] [DRY-RUN] Would download %s", colors.Green(ctx.Env.Name), colors.Cyan(path))
+		default:
+			ctx.Log.Printf("[%s] [DRY-RUN] Would update %s", colors.Green(ctx.Env.Name), colors.Yellow(path))
+		}
+		return
+	}
+
 	switch op {
 	case file.Skip:
 		if ctx.Flags.Verbose {
